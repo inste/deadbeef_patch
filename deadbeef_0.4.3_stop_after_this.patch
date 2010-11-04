@@ -1,0 +1,216 @@
+diff -u -r ./deadbeef-0.4.3/deadbeef.h ./deadbeef-0.4.3_patched/deadbeef.h
+--- ./deadbeef-0.4.3/deadbeef.h	2010-10-26 22:14:09.000000000 +0400
++++ ./deadbeef-0.4.3_patched/deadbeef.h	2010-11-04 23:23:19.000000000 +0300
+@@ -435,7 +435,8 @@
+     void (*pl_set_item_flags) (DB_playItem_t *it, uint32_t flags);
+     void (*pl_sort) (int iter, int id, const char *format, int ascending);
+     void (*pl_items_copy_junk)(DB_playItem_t *from, DB_playItem_t *first, DB_playItem_t *last);
+-
++    // stop_after_this
++    void (*pl_stop_after_this)(DB_playItem_t *it, int flags);
+     // playqueue support
+     int (*pl_playqueue_push) (DB_playItem_t *it);
+     void (*pl_playqueue_clear) (void);
+diff -u -r ./deadbeef-0.4.3/playlist.c ./deadbeef-0.4.3_patched/playlist.c
+--- ./deadbeef-0.4.3/playlist.c	2010-10-31 16:05:19.000000000 +0300
++++ ./deadbeef-0.4.3_patched/playlist.c	2010-11-04 23:25:47.000000000 +0300
+@@ -1675,6 +1675,9 @@
+     it->replaygain_album_peak = 1;
+     it->replaygain_track_peak = 1;
+     it->_refc = 1;
++    // ---------------
++    it->stop_after_this = 0;
++    // --------------
+     return it;
+ }
+ 
+@@ -2500,6 +2503,8 @@
+     const char *duration = NULL;
+     const char *elapsed = NULL;
+ 
++    int retval;
++
+     char *ss = s;
+ 
+     LOCK;
+@@ -2514,8 +2519,13 @@
+             text = fno;
+             break;
+         case DB_COLUMN_PLAYING:
+-            UNLOCK;
+-            return pl_format_item_queue (it, s, size);
++            // "Stop after this" indicator - "[S]" in column "Playing" after number of track in the playing queue
++            retval = pl_format_item_queue (it, s, size);
++            if (1 == it->stop_after_this) {
++               retval += snprintf((char *)(s + retval), size - retval, " [S]");
++            }
++            UNLOCK;
++            return retval;
+         }
+         if (text) {
+             strncpy (s, text, size);
+@@ -3103,6 +3113,19 @@
+     GLOBAL_UNLOCK;
+ }
+ 
++void
++pl_stop_after_this(playItem_t *it, int flags) {
++
++
++       GLOBAL_LOCK;
++       if (flags && 1 == it->stop_after_this)
++               it->stop_after_this = 0;
++       else
++               it->stop_after_this = flags;
++
++       GLOBAL_UNLOCK;
++}
++
+ int
+ pl_playqueue_push (playItem_t *it) {
+     if (playqueue_count == PLAYQUEUE_SIZE) {
+diff -u -r ./deadbeef-0.4.3/playlist.h ./deadbeef-0.4.3_patched/playlist.h
+--- ./deadbeef-0.4.3/playlist.h	2010-10-26 22:16:32.000000000 +0400
++++ ./deadbeef-0.4.3_patched/playlist.h	2010-11-04 23:24:08.000000000 +0300
+@@ -47,6 +47,8 @@
+     unsigned selected : 1;
+     unsigned played : 1; // mark as played in shuffle mode
+     unsigned in_playlist : 1; // 1 if item is in playlist
++    // -- stop_after_this ---
++    unsigned stop_after_this : 1; // stop after playing if 1
+ } playItem_t;
+ 
+ typedef struct playlist_s {
+@@ -321,6 +323,10 @@
+ void
+ pl_sort (int iter, int id, const char *format, int ascending);
+ 
++// stop_after_this
++void
++pl_stop_after_this (playItem_t *it, int flags);
++
+ // playqueue support functions
+ int
+ pl_playqueue_push (playItem_t *it);
+diff -u -r ./deadbeef-0.4.3/plugins/gtkui/plcommon.c ./deadbeef-0.4.3_patched/plugins/gtkui/plcommon.c
+--- ./deadbeef-0.4.3/plugins/gtkui/plcommon.c	2010-10-17 12:16:56.000000000 +0400
++++ ./deadbeef-0.4.3_patched/plugins/gtkui/plcommon.c	2010-11-04 22:18:16.000000000 +0300
+@@ -213,6 +213,30 @@
+ }
+ 
+ void
++main_stop_after_this_activate   	  (GtkMenuItem     *menuitem,
++                                        gpointer         user_data)
++{
++    int done = 0;
++
++    DB_playItem_t *it = deadbeef->pl_get_first (PL_MAIN);
++   
++    while (it) {
++        if (!done && deadbeef->pl_is_selected (it)) {
++               deadbeef->pl_stop_after_this (it, 1);
++               ++done;
++        } else {
++               deadbeef->pl_stop_after_this (it, 0);			
++        }
++        DB_playItem_t *next = deadbeef->pl_get_next (it, PL_MAIN);
++        deadbeef->pl_item_unref (it);
++        it = next;
++    }
++
++    playlist_refresh ();
++	
++}
++                                        
++void
+ main_remove_from_playback_queue_activate
+                                         (GtkMenuItem     *menuitem,
+                                         gpointer         user_data)
+@@ -391,6 +415,7 @@
+     GtkWidget *playlist_menu;
+     GtkWidget *add_to_playback_queue1;
+     GtkWidget *remove_from_playback_queue1;
++    GtkWidget *stop_after_this1;
+     GtkWidget *separator9;
+     GtkWidget *remove2;
+     GtkWidget *remove_from_disk;
+@@ -412,6 +437,14 @@
+     gtk_container_add (GTK_CONTAINER (playlist_menu), remove_from_playback_queue1);
+     g_object_set_data (G_OBJECT (remove_from_playback_queue1), "ps", listview);
+ 
++// ----------------
++       stop_after_this1 = gtk_menu_item_new_with_mnemonic (_("Stop after this track"));
++       gtk_widget_show (stop_after_this1);
++       gtk_container_add (GTK_CONTAINER (playlist_menu), stop_after_this1);
++       g_object_set_data (G_OBJECT (stop_after_this1), "ps", listview);
++// -------------------
++
++
+     reload_metadata = gtk_menu_item_new_with_mnemonic (_("Reload metadata"));
+     gtk_widget_show (reload_metadata);
+     gtk_container_add (GTK_CONTAINER (playlist_menu), reload_metadata);
+@@ -518,6 +551,13 @@
+     g_signal_connect ((gpointer) remove2, "activate",
+             G_CALLBACK (on_remove2_activate),
+             NULL);
++ //--------------
++    g_signal_connect ((gpointer) stop_after_this1, "activate",
++            G_CALLBACK (main_stop_after_this_activate),
++            NULL);
++ //--------------
++            
++            
+     if (!hide_remove_from_disk) {
+         g_signal_connect ((gpointer) remove_from_disk, "activate",
+                 G_CALLBACK (on_remove_from_disk_activate),
+diff -u -r ./deadbeef-0.4.3/plugins.c ./deadbeef-0.4.3_patched/plugins.c
+--- ./deadbeef-0.4.3/plugins.c	2010-10-26 22:16:05.000000000 +0400
++++ ./deadbeef-0.4.3_patched/plugins.c	2010-11-04 23:22:59.000000000 +0300
+@@ -179,6 +179,8 @@
+     // cuesheet support
+     .pl_insert_cue_from_buffer = (DB_playItem_t *(*) (DB_playItem_t *after, DB_playItem_t *origin, const uint8_t *buffer, int buffersize, int numsamples, int samplerate))pl_insert_cue_from_buffer,
+     .pl_insert_cue = (DB_playItem_t *(*)(DB_playItem_t *after, DB_playItem_t *origin, int numsamples, int samplerate))pl_insert_cue,
++    // stop_after_this
++    .pl_stop_after_this = (void (*) (DB_playItem_t * it, int flags))pl_stop_after_this,
+     // playqueue support
+     .pl_playqueue_push = (int (*) (DB_playItem_t *))pl_playqueue_push,
+     .pl_playqueue_clear = pl_playqueue_clear,
+diff -u -r ./deadbeef-0.4.3/streamer.c ./deadbeef-0.4.3_patched/streamer.c
+--- ./deadbeef-0.4.3/streamer.c	2010-10-31 16:03:52.000000000 +0300
++++ ./deadbeef-0.4.3_patched/streamer.c	2010-11-04 23:21:05.000000000 +0300
+@@ -879,6 +879,7 @@
+                 pl_item_unref (playing_track);
+                 playing_track = NULL;
+             }
++            
+             plug_trigger_event_trackchange (from, NULL);
+             if (from) {
+                 pl_item_unref (from);
+@@ -892,7 +893,17 @@
+         }
+ 
+         if (bytes_until_next_song == 0) {
+-            streamer_lock ();
++            streamer_lock ();
++ 
++            if (1 == playing_track->stop_after_this) {
++                pl_stop_after_this(playing_track, 0);
++                nextsong = -1;
++                p_stop ();
++                streamer_set_current (NULL);
++                streamer_unlock ();
++                continue;
++            }
++
+             if (!streaming_track) {
+                 // means last song was deleted during final drain
+                 nextsong = -1;
+@@ -914,6 +925,8 @@
+             // copy streaming into playing
+             trace ("\033[0;35mstreamer_start_playback[2] from %p to %p\033[37;0m\n", playing_track, streaming_track);
+             streamer_start_playback (playing_track, streaming_track);
++            
++            
+             last_bitrate = -1;
+             avg_bitrate = -1;
+             playlist_track = playing_track;
